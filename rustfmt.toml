@@ -1,0 +1,17 @@
+# rustfmt's settings for the workspace; install.d/build.sh's check_rust_format
+# holds the tree to them with `cargo fmt --all --check`.
+#
+# ONE OPTION, AND IT IS THE TREE'S OWN. Nothing held the tree to rustfmt until
+# 2026-10-13, and the code had been written to the full line width by hand: a
+# short call, a struct literal or a let-else kept on one line where it fits.
+# rustfmt's default heuristics break those at a fraction of the width -- a
+# call's arguments past 60 columns, a struct literal past 18, a let-else past
+# 50 -- and measured over the workspace that day they would have grown it from
+# 105,839 lines to 116,497 and rewritten 140 of its 152 files. "Max" lets each
+# of those use the whole width instead: 106,902 lines, in 115 files. It is a
+# stable option, so its output does not move with the toolchain, which is what
+# a check over it needs.
+#
+# No `edition`: `cargo fmt` reads it from Cargo.toml, and a copy here would be a
+# second place to change when the workspace's edition does.
+use_small_heuristics = "Max"

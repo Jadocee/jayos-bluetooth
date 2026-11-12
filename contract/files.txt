@@ -1,0 +1,16 @@
+# Every path the jayos-bluetooth package installs, relative to /, one a line.
+# Written by hand: the package's promise of where things are, which JayOS
+# reads to find the WirePlumber drop-ins and BlueZ's main.conf. A test,
+# tests/shell/test-packaging.sh, runs packaging/steps.sh's package verb and
+# holds what it installs to this list exactly, both ways.
+usr/bin/jayos-bluetooth
+usr/share/jayos-bluetooth/contract/README.md
+usr/share/jayos-bluetooth/contract/VERSION
+usr/share/jayos-bluetooth/contract/files.txt
+usr/share/jayos-bluetooth/contract/ops.txt
+usr/share/jayos-bluetooth/contract/steps.txt
+usr/share/jayos-bluetooth/contract/verbs.txt
+usr/share/jayos-bluetooth/main.conf
+usr/share/licenses/jayos-bluetooth/LICENSE
+usr/share/wireplumber/wireplumber.conf.d/51-bluez-a2dp.conf
+usr/share/wireplumber/wireplumber.conf.d/51-bluez-headset.conf

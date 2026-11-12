@@ -1,0 +1,60 @@
+# A jayos-bluetooth release's page, for a tag the owner pushed with
+# tools/release.sh. The workflow holds no key and makes no tag: it checks the
+# tag it is handed -- signed by a key main's .github/allowed_signers lists, on
+# main, VERSION its version -- runs the package's check at the tag, and
+# publishes the release with its notes. docs/RELEASES.md is the account.
+#
+# Not run here: nothing in this repository has run on GitHub's runners.
+# tools/publish-release.sh, which every step calls, is run by
+# tests/shell/test-release.sh against scratch repositories and keys.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      # Every branch, so origin/main is there to check the tag against; the
+      # same pinned checkout JayOS's workflows use.
+      - name: Check out the tag, with every branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The tag is the owner's, on main, and VERSION's
+        env:
+          TAG: ${{ github.ref_name }}
+        run: tools/publish-release.sh verify "$TAG"
+
+      - name: The package's check, at the tag
+        run: tools/check.sh
+
+      - name: The notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: tools/publish-release.sh notes "$TAG" >"$RUNNER_TEMP/notes.md"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: tools/publish-release.sh publish "$TAG" "$RUNNER_TEMP/notes.md"

@@ -1,0 +1,45 @@
+[package]
+name = "jayos-bluetooth"
+description = "Bluetooth manager for the JayOS shell: BlueZ adapters and devices, a pairing agent, and OBEX file transfer"
+# VERSION says the same; tests/shell/test-version.sh holds the two equal,
+# since a release is VERSION's and the binary reports this one.
+version = "1.0.0"
+edition = "2021"
+# jayos's workspace floor, which this crate was built under before the move.
+rust-version = "1.85"
+license = "MIT"
+# The MSRV-aware resolver: zbus 5.14 and later declare Rust 1.87, and this
+# keeps a fresh resolution at 5.13 under the 1.85 floor above.
+resolver = "3"
+repository = "https://github.com/Jadocee/jayos-bluetooth"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+# D-Bus: BlueZ and obexd have no other interface, and a pairing agent or a
+# file agent is an object they call back. Pure Rust, so no libdbus headers at
+# build time. default-features off with the two features spelled out, so a
+# future default (tokio, say) cannot arrive unasked; 5.13 because 5.14 and
+# later need Rust 1.87 -- the resolver below holds that.
+zbus = { version = "5.13", default-features = false, features = ["async-io", "blocking-api"] }
+# The one-shot channel an agent method parks on while a person decides. Already
+# in zbus's own tree; a std channel cannot be awaited, and an agent method that
+# blocks its thread stalls zbus's executor and leaves BlueZ's Cancel
+# unanswerable.
+async-channel = "2"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# As jayos's workspace had them: a helper whose reason to be Rust is starting
+# fast, built once at install time, so slower builds cost nobody twice.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
