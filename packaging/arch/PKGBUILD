@@ -1,0 +1,72 @@
+# Maintainer: Jadocee
+#
+# jayos-bluetooth, built from the checkout this file sits in.
+#
+#   cd packaging/arch && makepkg -si
+#
+# THIS IS THE RECIPE FOR A CHECKOUT, NOT FOR A RELEASE
+#
+# Everything comes from the working tree two directories up, whatever it
+# holds -- committed or not, so somebody changing the daemon builds and
+# installs the change without pushing it first. JayOS carries its own recipe
+# for the other case, an install of the release it pins by tag and by commit
+# (jayos: pkgbuilds/jayos-bluetooth/PKGBUILD; docs/RELEASES.md here).
+#
+# Both recipes do nothing but name their sources and call packaging/steps.sh,
+# which holds every build flag, every proof and the file list once. Its
+# header says why.
+#
+# pkgver is VERSION, written out, and Cargo.toml's version says the same:
+# tests/shell/test-packaging.sh holds the three to each other. A pkgver()
+# function would make makepkg rewrite this file on every build, and a recipe
+# that edits itself in a checkout is a recipe whose diff nobody can read.
+
+pkgname=jayos-bluetooth
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="The JayOS shell's Bluetooth manager: BlueZ adapters and devices, a pairing agent, OBEX file transfer, and the WirePlumber and BlueZ settings a headset needs"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Jadocee/jayos-bluetooth"
+license=('MIT')
+# glibc and gcc-libs for the binary, whose NEEDED list is libc, libm,
+# libgcc_s and the loader (steps.sh's check proves it on every build); bluez
+# for bluetoothd, the system service it is a client and an agent of; dbus for
+# the system and session buses it speaks on. zbus is pure Rust, so no libdbus.
+# tests/shell/test-packaging.sh holds this list, and JayOS's copy of it, to
+# each other.
+depends=('glibc' 'gcc-libs' 'bluez' 'dbus')
+optdepends=('bluez-obex: obexd, for files sent and received'
+            'xdg-desktop-portal: the file chooser `send` and the page'"'"'s Send files open'
+            'wireplumber: reads the two drop-ins this installs for headsets'
+            'bluez-utils: bluetoothctl, which jayos-sony-xm5 and a person at a terminal ask')
+# cargo is provided by the rustup package as well as by rust, so either
+# toolchain satisfies makepkg; git for JayOS's recipe's source line, kept
+# here so that both recipes ask for the same makedepends.
+makedepends=('cargo' 'git')
+# !lto: makepkg's lto option adds -flto=auto to C flags that reach nothing
+# here. !debug: the profile strips, so a -debug split package would be empty.
+options=('!lto' '!debug')
+source=()
+sha256sums=()
+
+# The checkout: two levels above this file. makepkg sets startdir to its
+# physical working directory already; realpath is for a caller that sets it
+# another way, as tests/shell/test-packaging.sh does.
+_tree() { realpath "$startdir/../.."; }
+_steps() { bash "$(_tree)/packaging/steps.sh" "$@"; }
+
+prepare() {
+    _steps fetch
+}
+
+build() {
+    _steps build
+}
+
+check() {
+    _steps check
+}
+
+package() {
+    _steps package "$pkgdir"
+}

@@ -1,0 +1,18 @@
+# The keys a jayos-bluetooth release tag may be signed with.
+#
+# One line per key, in ssh-keygen's ALLOWED SIGNERS format (ssh-keygen(1)):
+#
+#   <your email> namespaces="git" ssh-ed25519 AAAA...
+#
+# namespaces="git" limits the key to git's signatures, so a signature it made
+# for anything else is not one a tag can borrow; tests/shell/test-release.sh
+# fails a key line without it.
+#
+# EMPTY UNTIL THE OWNER ADDS THEIR KEY, and every release is refused until
+# then: tools/release.sh will not tag, and tools/publish-release.sh will not
+# publish, against a file with no key in it. Only the PUBLIC half of the key
+# goes here; it can be the line JayOS's .github/allowed_signers carries, so
+# one key signs both. docs/RELEASES.md, "The owner's steps", has how.
+#
+# Both read this file as origin/main has it -- never as a tag's own tree has
+# it -- so a key added here counts only once main has taken it.
