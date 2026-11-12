@@ -15,7 +15,7 @@
 //! reaches the person through the core, and a core blocked in Pair could
 //! never forward it.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -32,7 +32,7 @@ use crate::agent::{AgentEvent, ObexAgent, Owner, PairingAgent};
 use crate::bus::{self, BusError, Signal, BLUEZ, OBEX};
 use crate::discovery::{Change, Interest};
 use crate::files::{self, DirEnv};
-use crate::model::{props_from, Model, Props, Val, ADAPTER, DEVICE};
+use crate::model::{props_from, Model, Props, Val, ADAPTER, DEVICE, TRANSPORT};
 use crate::portal::{self, Picked};
 use crate::prompts::{self, Answer, Book, Details, Kind, Origin, Responder, Subject};
 use crate::protocol::{self, Command, Files, Op};
@@ -245,6 +245,10 @@ struct Core {
     prompts: Book,
     transfers: Transfers,
     interest: Interest,
+    /// Adapters somebody wants scanning whose discovery this daemon is
+    /// holding back because audio is streaming over them. See
+    /// `audio_yield`.
+    yielded: BTreeSet<String>,
     busy: HashMap<String, Vec<(u64, &'static str)>>,
     busy_seq: u64,
     batches: HashMap<u64, Batch>,
@@ -318,6 +322,7 @@ pub fn run() -> u8 {
         prompts: Book::default(),
         transfers: Transfers::default(),
         interest: Interest::default(),
+        yielded: BTreeSet::new(),
         busy: HashMap::new(),
         busy_seq: 0,
         batches: HashMap::new(),
@@ -577,6 +582,7 @@ impl Core {
     fn state_line(&self) -> String {
         let (adapters, devices) = if self.bluez {
             let scanning = |p: &str| self.interest.wanted(p);
+            let paused = |p: &str| self.yielded.contains(p);
             let busy = |p: &str| {
                 self.busy
                     .get(p)
@@ -584,7 +590,7 @@ impl Core {
                     .map(|(_, op)| op.to_string())
                     .unwrap_or_default()
             };
-            (self.model.adapters_json(scanning), self.model.devices_json(busy))
+            (self.model.adapters_json(scanning, paused), self.model.devices_json(busy))
         } else {
             (Vec::new(), Vec::new())
         };
@@ -681,7 +687,9 @@ impl Core {
             return;
         }
         for adapter in self.interest.drop_client(client) {
-            self.stop_discovery(adapter);
+            if !self.yielded.remove(&adapter) {
+                self.stop_discovery(adapter);
+            }
         }
         self.changed();
     }
@@ -849,6 +857,9 @@ impl Core {
         self.bluez = false;
         self.bluez_owner.set(None);
         self.model.clear();
+        // Nothing streams through a bluetoothd that is gone, and the next
+        // one's transports decide afresh in bluez_objects.
+        self.yielded.clear();
         self.agent.registered = false;
         self.agent.pending = false;
         self.agent.stuck = false;
@@ -934,8 +945,12 @@ impl Core {
                 let paired = iface == DEVICE && changed.get("Paired") == Some(&Val::Bool(true));
                 let powered_on =
                     iface == ADAPTER && changed.get("Powered") == Some(&Val::Bool(true));
+                let stream = iface == TRANSPORT && changed.contains_key("State");
                 if !self.model.changed(&path, &iface, changed, &invalidated) {
                     return;
+                }
+                if stream {
+                    self.audio_yield();
                 }
                 if powered_on && was_powered != Some(true) && self.interest.wanted(&path) {
                     self.start_discovery(path.clone(), None);
@@ -948,7 +963,11 @@ impl Core {
             }
             Signal::Added { path, ifaces } => {
                 let adapter = ifaces.contains_key(ADAPTER) && !self.model.has(&path, ADAPTER);
+                let stream = ifaces.contains_key(TRANSPORT);
                 self.model.add(&path, ifaces);
+                if stream {
+                    self.audio_yield();
+                }
                 // An adapter that comes back already powered -- re-enumerated
                 // after a resume, a dongle plugged in again -- sends no
                 // Powered change, so the arm above never sees it. Interest is
@@ -962,7 +981,11 @@ impl Core {
                 self.changed();
             }
             Signal::Removed { path, ifaces } => {
+                let stream = ifaces.iter().any(|i| i == TRANSPORT);
                 self.model.remove(&path, &ifaces);
+                if stream {
+                    self.audio_yield();
+                }
                 self.changed();
             }
         }
@@ -1636,6 +1659,18 @@ impl Core {
     }
 
     fn start_discovery(&mut self, adapter: String, reply: Option<(u64, String)>) {
+        // Held back while audio streams over this adapter, and started by
+        // audio_yield when the stream ends. The client is told it has its
+        // scan: the interest is kept, and the state says why nothing is
+        // being found (`audioPaused`).
+        if self.model.streaming_on(&adapter) {
+            self.yielded.insert(adapter);
+            if let Some((client, id)) = reply {
+                self.reply_ok(client, &id, "scan");
+            }
+            return;
+        }
+        self.yielded.remove(&adapter);
         let tx = self.tx.clone();
         let Some(b) = &self.system else { return };
         b.run(move |c| {
@@ -1663,6 +1698,52 @@ impl Core {
         }
     }
 
+    /// DISCOVERY YIELDS TO AUDIO. A scan is an inquiry on BR/EDR and an LE
+    /// scan beside it, and BlueZ runs both at full duty for as long as it is
+    /// discovering (src/adapter.c's discovery, and the kernel's interleaved
+    /// discovery in net/bluetooth/hci_sync.c). The radio is one radio: every
+    /// inquiry window is time an A2DP link is not being served, and a
+    /// headset's buffer, a few hundred milliseconds of LDAC at most, runs dry
+    /// -- heard as audio that lags and cuts out, the owner's report of
+    /// 2026-11-12 over a WH-1000XM5. The page scans for as long as it is open
+    /// and the network popup's Bluetooth tab for as long as it is shown, so
+    /// the case is common: opening either to connect the headset, then
+    /// listening with it open.
+    ///
+    /// So while a transport under an adapter is acquired -- audio streaming,
+    /// or about to -- this daemon stops its discovery there, keeps every
+    /// client's interest, and starts discovery again when the last stream
+    /// ends. Android does the like for A2DP (read, not run). Only this
+    /// daemon's own discovery: BlueZ keeps one session per D-Bus connection,
+    /// and another program's scan is that program's.
+    ///
+    /// Run over every adapter with interest whenever a transport comes, goes
+    /// or changes State, which is cheap -- a handful of paths -- and keeps
+    /// one rule for every way a stream can start or end.
+    fn audio_yield(&mut self) {
+        let mut moved = false;
+        for adapter in self.interest.adapters() {
+            let streaming = self.model.streaming_on(&adapter);
+            let powered = self.model.bool(&adapter, ADAPTER, "Powered") == Some(true);
+            if streaming && !self.yielded.contains(&adapter) {
+                self.yielded.insert(adapter.clone());
+                if powered {
+                    self.stop_discovery(adapter);
+                }
+                moved = true;
+            } else if !streaming && self.yielded.contains(&adapter) {
+                self.yielded.remove(&adapter);
+                if powered {
+                    self.start_discovery(adapter, None);
+                }
+                moved = true;
+            }
+        }
+        if moved {
+            self.changed();
+        }
+    }
+
     fn scan(&mut self, client: u64, id: String, adapter: String, on: bool) {
         // Giving interest back needs no BlueZ. Refused while bluetoothd or
         // the adapter was away, an `off` left the interest in place, and
@@ -1670,7 +1751,9 @@ impl Core {
         // that had stopped looking, the network popup on its Wi-Fi tab.
         if !on {
             if let Change::Stop(a) = self.interest.set(client, &adapter, false) {
-                if self.bluez_problem(&a, ADAPTER).is_none() {
+                // A discovery held back for audio was never started, so
+                // there is nothing to stop.
+                if !self.yielded.remove(&a) && self.bluez_problem(&a, ADAPTER).is_none() {
                     self.stop_discovery(a);
                 }
             }
@@ -1691,7 +1774,9 @@ impl Core {
                 }
             }
             Change::Stop(a) => {
-                self.stop_discovery(a);
+                if !self.yielded.remove(&a) {
+                    self.stop_discovery(a);
+                }
                 self.reply_ok(client, &id, "scan");
             }
             Change::Nothing => self.reply_ok(client, &id, "scan"),

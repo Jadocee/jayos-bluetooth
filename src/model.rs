@@ -21,6 +21,10 @@ use zbus::zvariant::{OwnedValue, Value as ZValue};
 pub const ADAPTER: &str = "org.bluez.Adapter1";
 pub const DEVICE: &str = "org.bluez.Device1";
 pub const BATTERY: &str = "org.bluez.Battery1";
+/// An A2DP or LE Audio stream between an adapter and a device. BlueZ puts it
+/// under the device's path (`/org/bluez/hci0/dev_.../sep1/fd0`), so the
+/// adapter it uses is the path's own prefix.
+pub const TRANSPORT: &str = "org.bluez.MediaTransport1";
 
 /// A property value, reduced to what a snapshot can show.
 #[derive(Debug, Clone, PartialEq)]
@@ -244,7 +248,16 @@ impl Model {
     /// `scanning` is whether any client of this daemon wants discovery on
     /// that adapter, which BlueZ's own `Discovering` cannot say: that is true
     /// whenever anybody on the system is scanning.
-    pub fn adapters_json(&self, scanning: impl Fn(&str) -> bool) -> Vec<Value> {
+    ///
+    /// `audioPaused` is whether this daemon is holding that adapter's
+    /// discovery back because audio is streaming over it
+    /// (`Model::streaming_on`), so a page can say why a scan it asked for
+    /// finds nothing new rather than look broken.
+    pub fn adapters_json(
+        &self,
+        scanning: impl Fn(&str) -> bool,
+        audio_paused: impl Fn(&str) -> bool,
+    ) -> Vec<Value> {
         self.paths_with(ADAPTER)
             .map(|path| {
                 let s = |k: &str| self.str(path, ADAPTER, k).unwrap_or("").to_string();
@@ -264,9 +277,29 @@ impl Model {
                     "pairableTimeout": n("PairableTimeout"),
                     "discovering": b("Discovering"),
                     "scanning": scanning(path),
+                    "audioPaused": audio_paused(path),
                 })
             })
             .collect()
+    }
+
+    /// Whether audio is streaming between `adapter` and any device: a
+    /// MediaTransport1 under it whose State is `active`, or `pending`, the
+    /// moment before it is -- BlueZ's two states for a transport that has
+    /// been or is being acquired (doc/org.bluez.MediaTransport.rst). `idle`
+    /// is a transport that exists and carries nothing: a headset connected
+    /// with nothing playing, which discovery does not hurt.
+    ///
+    /// By path rather than by the transport's `Device` property: every
+    /// transport BlueZ makes lives under its device, and the device under its
+    /// adapter, so the prefix answers without a second lookup that a
+    /// transport added before its device's properties arrived could miss.
+    pub fn streaming_on(&self, adapter: &str) -> bool {
+        let under = format!("{adapter}/");
+        self.paths_with(TRANSPORT).any(|p| {
+            p.starts_with(&under)
+                && matches!(self.str(p, TRANSPORT, "State"), Some("active" | "pending"))
+        })
     }
 
     /// Devices, in the shape the protocol's `devices` array takes. Every key
@@ -454,7 +487,7 @@ mod tests {
     #[test]
     fn every_adapter_key_is_present() {
         let m = tree();
-        let a = &m.adapters_json(|p| p == "/org/bluez/hci0")[0];
+        let a = &m.adapters_json(|p| p == "/org/bluez/hci0", |_| false)[0];
         assert_eq!(a["id"], "hci0");
         assert_eq!(a["name"], "laptop");
         assert_eq!(a["systemName"], "archbox");
@@ -463,7 +496,33 @@ mod tests {
         assert_eq!(a["discoverableTimeout"], 180);
         assert_eq!(a["pairableTimeout"], Value::Null);
         assert_eq!(a["scanning"], true);
-        assert_eq!(a.as_object().unwrap().len(), 13);
+        assert_eq!(a["audioPaused"], false);
+        assert_eq!(a.as_object().unwrap().len(), 14);
+    }
+
+    #[test]
+    fn audio_streams_only_where_a_transport_under_the_adapter_is_acquired() {
+        let mut m = tree();
+        let hci0 = "/org/bluez/hci0";
+        let fd = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/sep1/fd0";
+        assert!(!m.streaming_on(hci0), "no transport at all");
+        m.add(
+            fd,
+            Ifaces::from([(TRANSPORT.to_string(), props(&[("State", Val::Str("idle".into()))]))]),
+        );
+        assert!(!m.streaming_on(hci0), "a connected headset playing nothing");
+        for state in ["pending", "active"] {
+            m.changed(fd, TRANSPORT, props(&[("State", Val::Str(state.into()))]), &[]);
+            assert!(m.streaming_on(hci0), "{state}");
+            // hci1 is not hci0, and a prefix without its slash would say it was.
+            assert!(!m.streaming_on("/org/bluez/hci"), "{state} on a prefix of the path");
+            assert!(!m.streaming_on("/org/bluez/hci1"), "{state} on another adapter");
+        }
+        m.changed(fd, TRANSPORT, props(&[("State", Val::Str("idle".into()))]), &[]);
+        assert!(!m.streaming_on(hci0), "back to idle");
+        m.changed(fd, TRANSPORT, props(&[("State", Val::Str("active".into()))]), &[]);
+        m.remove(fd, &[TRANSPORT.to_string()]);
+        assert!(!m.streaming_on(hci0), "an active transport removed with its stream");
     }
 
     #[test]

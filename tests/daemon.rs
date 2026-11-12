@@ -823,6 +823,32 @@ impl MockBattery {
     }
 }
 
+/// An A2DP stream's transport, as bluetoothd exports one under a device. The
+/// daemon reads State from InterfacesAdded and PropertiesChanged alone, so the
+/// tests change it by emitting the signal rather than through the property.
+struct MockTransport {
+    state: &'static str,
+}
+
+#[interface(name = "org.bluez.MediaTransport1")]
+impl MockTransport {
+    #[zbus(property, name = "State")]
+    fn state(&self) -> String {
+        self.state.into()
+    }
+
+    #[zbus(property, name = "Device")]
+    fn device(&self) -> OwnedObjectPath {
+        OwnedObjectPath::try_from(HEADSET).unwrap()
+    }
+
+    #[zbus(property, name = "Codec")]
+    fn codec(&self) -> u8 {
+        // A2DP's vendor-specific codec id, which LDAC uses.
+        0xff
+    }
+}
+
 fn dev(address: &str, name: &str, paired: bool, trusted: bool, passkey: u32) -> Arc<Mutex<Dev>> {
     Arc::new(Mutex::new(Dev {
         address: address.into(),
@@ -2235,6 +2261,120 @@ fn scan_interest_is_released_when_its_client_disconnects() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(log.count("StopDiscovery"), 2, "{:?}", log.all());
+}
+
+/// Waits for the log to hold `want` of `line`, and says what it holds if not.
+fn count_reaches(log: &Log, line: &str, want: usize) {
+    let deadline = Instant::now() + WAIT;
+    while log.count(line) < want && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(log.count(line), want, "{line}: {:?}", log.all());
+}
+
+/// Discovery is stopped while audio streams over the adapter and started
+/// again when it stops, the client's interest kept throughout -- the
+/// owner's report of 2026-11-12, a WH-1000XM5 that lagged and cut out, and
+/// `Core::audio_yield`'s account of why a scan does that.
+#[test]
+fn discovery_yields_to_audio_streaming_over_the_adapter() {
+    let Some(mut rig) = Rig::start() else { return };
+    let d = &mut rig.daemon;
+    let log = &rig.bluez.log;
+    let fd = format!("{HEADSET}/sep1/fd0");
+
+    assert_eq!(
+        d.ask(json!({"id": "s1", "op": "scan", "adapter": ADAPTER, "on": true}))["ok"],
+        true
+    );
+    count_reaches(log, "StartDiscovery", 1);
+    d.state("scanning, nothing playing", |s| {
+        s["adapters"][0]["scanning"] == true && s["adapters"][0]["audioPaused"] == false
+    });
+
+    // A headset connected and idle costs discovery nothing, and is left be.
+    rig.bluez.conn.object_server().at(fd.as_str(), MockTransport { state: "idle" }).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(log.count("StopDiscovery"), 0, "an idle transport: {:?}", log.all());
+
+    // Playback starts: pending, then active. One stop, at the first.
+    let state = |v: &'static str| HashMap::from([("State", ZValue::from(v))]);
+    rig.bluez.emit(&fd, "org.bluez.MediaTransport1", state("pending"), vec![]);
+    count_reaches(log, "StopDiscovery", 1);
+    rig.bluez.emit(&fd, "org.bluez.MediaTransport1", state("active"), vec![]);
+    d.state("paused for audio", |s| {
+        s["adapters"][0]["scanning"] == true && s["adapters"][0]["audioPaused"] == true
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(log.count("StopDiscovery"), 1, "pending then active is one stream");
+
+    // Paused, a second client's scan is taken and answered, and starts nothing.
+    let mut w = Proc::spawn(&rig.env, "watch");
+    w.state("watch connected", |s| s["bluez"] == true);
+    w.send(json!({"id": "w1", "op": "scan", "adapter": ADAPTER, "on": true}));
+    assert_eq!(w.reply("w1")["ok"], true);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(log.count("StartDiscovery"), 1, "no scan while audio plays: {:?}", log.all());
+
+    // The stream ends: discovery comes back for the clients still asking.
+    rig.bluez.emit(&fd, "org.bluez.MediaTransport1", state("idle"), vec![]);
+    count_reaches(log, "StartDiscovery", 2);
+    d.state("resumed", |s| s["adapters"][0]["audioPaused"] == false);
+
+    // Again, and this time the transport goes with the stream -- a headset
+    // switched off mid-track sends InterfacesRemoved and no State.
+    rig.bluez.emit(&fd, "org.bluez.MediaTransport1", state("active"), vec![]);
+    count_reaches(log, "StopDiscovery", 2);
+    rig.bluez.conn.object_server().remove::<MockTransport, _>(fd.as_str()).unwrap();
+    count_reaches(log, "StartDiscovery", 3);
+
+    // Both clients give their interest back while paused, the watch by
+    // leaving and the owner by saying so: nothing was started, so nothing is
+    // stopped, and the stream's end starts nothing.
+    rig.bluez.conn.object_server().at(fd.as_str(), MockTransport { state: "active" }).unwrap();
+    count_reaches(log, "StopDiscovery", 3);
+    drop(w);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        d.ask(json!({"id": "s2", "op": "scan", "adapter": ADAPTER, "on": false}))["ok"],
+        true
+    );
+    d.state("nobody scanning", |s| {
+        s["adapters"][0]["scanning"] == false && s["adapters"][0]["audioPaused"] == false
+    });
+    assert_eq!(log.count("StopDiscovery"), 3, "{:?}", log.all());
+
+    // A scan first asked for while audio already plays is held back from
+    // the start, and begins when the stream ends.
+    assert_eq!(
+        d.ask(json!({"id": "s3", "op": "scan", "adapter": ADAPTER, "on": true}))["ok"],
+        true
+    );
+    d.state("asked for, held back", |s| s["adapters"][0]["audioPaused"] == true);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(log.count("StartDiscovery"), 3, "a scan started over a stream: {:?}", log.all());
+    rig.bluez.emit(&fd, "org.bluez.MediaTransport1", state("idle"), vec![]);
+    count_reaches(log, "StartDiscovery", 4);
+    assert_eq!(
+        d.ask(json!({"id": "s4", "op": "scan", "adapter": ADAPTER, "on": false}))["ok"],
+        true
+    );
+    count_reaches(log, "StopDiscovery", 4);
+
+    // And a client that leaves while its held-back scan is the only one
+    // stops nothing either.
+    rig.bluez.emit(&fd, "org.bluez.MediaTransport1", state("active"), vec![]);
+    let mut w = Proc::spawn(&rig.env, "watch");
+    w.state("watch connected", |s| s["bluez"] == true);
+    w.send(json!({"id": "w2", "op": "scan", "adapter": ADAPTER, "on": true}));
+    assert_eq!(w.reply("w2")["ok"], true);
+    d.state("the watch's scan, held back", |s| s["adapters"][0]["audioPaused"] == true);
+    drop(w);
+    d.state("the watch gone", |s| s["adapters"][0]["scanning"] == false);
+    rig.bluez.emit(&fd, "org.bluez.MediaTransport1", state("idle"), vec![]);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(log.count("StopDiscovery"), 4, "{:?}", log.all());
+    assert_eq!(log.count("StartDiscovery"), 4, "{:?}", log.all());
 }
 
 #[test]
