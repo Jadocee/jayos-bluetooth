@@ -118,8 +118,12 @@ else
     # test-manager.sh that answers as a file says: the gates are steps.sh's,
     # and what cargo or the suite find is their own business.
     mkdir -p "$WORK/bin" "$TREE/tests/shell"
-    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> %q\nexit 0\n' "$WORK/cargo.calls" > "$WORK/bin/cargo"
-    chmod +x "$WORK/bin/cargo"
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> %q\nprintf "%%s\\n" "${RUSTFLAGS-<unset>}" >> %q\nexit 0\n' \
+        "$WORK/cargo.calls" "$WORK/cargo.flags" > "$WORK/bin/cargo"
+    # ld.mold, for steps.sh to find as the recipes' makedepends put it there;
+    # nothing runs it, since the cargo links nothing.
+    printf '#!/bin/sh\nexit 0\n' > "$WORK/bin/ld.mold"
+    chmod +x "$WORK/bin/cargo" "$WORK/bin/ld.mold"
     printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$JAYOS_BLUETOOTH_BIN" > %q\nexit "$(cat %q 2>/dev/null || echo 0)"\n' \
         "$WORK/suite.bin" "$WORK/suite.status" > "$TREE/tests/shell/test-manager.sh"
     touch "$TREE/Cargo.lock"
@@ -165,6 +169,40 @@ else
     check "and its 2 is a failure too, over a binary just built" 1 "$ST"
     says "saying the suite's status" "test-manager.sh exited 2" "$OUT"
     rm -f "$WORK/suite.status"
+
+    # MOLD LINKS IT, through RUSTFLAGS: build and check start cargo with mold's
+    # flag, after whatever makepkg.conf set and once; and with no ld.mold each
+    # refuses before cargo, naming it. A cargo config would be read and
+    # replaced by makepkg's RUSTFLAGS, which is why steps.sh says mold itself.
+    : > "$WORK/cargo.flags"
+    OUT=$(stepcheck); ST=$?
+    check "check starts cargo with mold's flag in RUSTFLAGS" "0|-C link-arg=-fuse-ld=mold" \
+        "$ST|$(paste -sd'|' "$WORK/cargo.flags")"
+    stepbuild() { (env -u RUSTFLAGS PATH="$WORK/bin:$PATH" "$@" bash "$TREE/packaging/steps.sh" build 2>&1); }
+    : > "$WORK/cargo.flags"; OUT=$(stepbuild); ST=$?
+    check "and build does too" "0|-C link-arg=-fuse-ld=mold" "$ST|$(paste -sd'|' "$WORK/cargo.flags")"
+    : > "$WORK/cargo.flags"; OUT=$(stepbuild RUSTFLAGS=-Cforce-frame-pointers=yes); ST=$?
+    check "after the RUSTFLAGS makepkg set, which stay" "0|-Cforce-frame-pointers=yes -C link-arg=-fuse-ld=mold" \
+        "$ST|$(paste -sd'|' "$WORK/cargo.flags")"
+    : > "$WORK/cargo.flags"; OUT=$(stepbuild RUSTFLAGS="-C link-arg=-fuse-ld=mold"); ST=$?
+    check "and not a second time over a RUSTFLAGS that has it already" "0|-C link-arg=-fuse-ld=mold" \
+        "$ST|$(paste -sd'|' "$WORK/cargo.flags")"
+    # A PATH of links to every command the fakes and this machine have but
+    # ld.mold, so a machine that has mold runs these as one that does not.
+    NOMOLD="$WORK/no-mold-bin"
+    mkdir -p "$NOMOLD"
+    IFS=: read -ra _dirs <<<"$WORK/bin:$PATH"
+    for _d in "${_dirs[@]}"; do
+        for _f in "$_d"/*; do
+            [[ -x "$_f" && ! -d "$_f" && "${_f##*/}" != ld.mold && ! -e "$NOMOLD/${_f##*/}" ]] && ln -s "$_f" "$NOMOLD/${_f##*/}"
+        done
+    done
+    for verb in build check; do
+        : > "$WORK/cargo.calls"
+        OUT=$(PATH="$NOMOLD" bash "$TREE/packaging/steps.sh" "$verb" 2>&1); ST=$?
+        check "with no mold, $verb refuses before cargo is asked anything" "1|1|" \
+            "$ST|$(grep -c 'mold is not installed, and this build links with it' <<<"$OUT")|$(cat "$WORK/cargo.calls")"
+    done
 fi
 
 # ── the recipe calls the steps, and nothing else ─────────────────────────────
@@ -190,6 +228,34 @@ check "it names no source of its own: the checkout is the source" "" \
     "$(sed -n 's/^source=(\(.*\))$/\1/p' "$RECIPE")"
 DEPS=$(sed -n "s/^depends=(\(.*\))$/\1/p" "$RECIPE" | tr -d "'")
 check "depends: glibc, gcc-libs, bluez and dbus" "glibc gcc-libs bluez dbus" "$DEPS"
+
+MAKEDEPS=$(sed -n "s/^makedepends=(\(.*\))$/\1/p" "$RECIPE" | tr -d "'")
+check "makedepends: cargo, git and mold, which steps.sh links with" "cargo git mold" "$MAKEDEPS"
+
+# ── the crate is linked with mold ────────────────────────────────────────────
+echo
+echo ".cargo/config.toml and tools/check.sh: mold links the crate"
+# The file's one setting, as a TOML reader reads it: mold's flag for the x86_64
+# target, which cargo run in this tree reads -- tools/check.sh's, and a build by
+# hand. steps.sh appends the same flag to RUSTFLAGS itself, spelt alike.
+MOLD_CFG="$ROOT/.cargo/config.toml"
+if [[ ! -f "$MOLD_CFG" ]]; then
+    bad ".cargo/config.toml is gone, and nothing links the crate with mold"
+elif python3 -c 'import tomllib' 2>/dev/null; then
+    check "it holds one setting: mold, as the x86_64 linker's argument" \
+        '{"target": {"x86_64-unknown-linux-gnu": {"rustflags": ["-C", "link-arg=-fuse-ld=mold"]}}}' \
+        "$(python3 -I -c 'import json, sys, tomllib; print(json.dumps(tomllib.load(open(sys.argv[1], "rb")), sort_keys=True))' "$MOLD_CFG" 2>&1)"
+else
+    skip ".cargo/config.toml as TOML not exercised: no python3 with tomllib"
+fi
+check "and packaging/steps.sh appends the same flag" "1" \
+    "$(grep -vE '^[[:space:]]*#' "$STEPS" | grep -cxF 'MOLD_FLAG="-C link-arg=-fuse-ld=mold"')"
+# tools/check.sh's crate step, read rather than run, since running it is a
+# cargo build: its build and its tests each through the one array an empty
+# RUSTFLAGS goes into, only where there is no ld.mold, with the counted skip.
+RUST_STEP=$(sed -n '/^rust_checks() {$/,/^}$/p' "$ROOT/tools/check.sh" | grep -vE '^[[:space:]]*#')
+check "tools/check.sh builds and tests through it, falling back only with no ld.mold, said as a skip" "2|1|1|1" \
+    "$(grep -cE '^[[:space:]]+env "\$\{link\[@\]\}" cargo (build|test) --locked \|\| return 1$' <<<"$RUST_STEP")|$(grep -cE '^[[:space:]]+if ! command -v ld\.mold >/dev/null 2>&1; then$' <<<"$RUST_STEP")|$(grep -cE '^[[:space:]]+link=\(RUSTFLAGS=\)$' <<<"$RUST_STEP")|$(grep -cF 'skip linking the crate with mold not exercised' <<<"$RUST_STEP")"
 
 echo
 SKIPPED=""

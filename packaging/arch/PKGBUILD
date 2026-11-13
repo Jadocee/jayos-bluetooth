@@ -41,8 +41,9 @@ optdepends=('bluez-obex: obexd, for files sent and received'
             'bluez-utils: bluetoothctl, which jayos-sony-xm5 and a person at a terminal ask')
 # cargo is provided by the rustup package as well as by rust, so either
 # toolchain satisfies makepkg; git for JayOS's recipe's source line, kept
-# here so that both recipes ask for the same makedepends.
-makedepends=('cargo' 'git')
+# here so that both recipes ask for the same makedepends; and mold, which
+# packaging/steps.sh links with and refuses to build without.
+makedepends=('cargo' 'git' 'mold')
 # !lto: makepkg's lto option adds -flto=auto to C flags that reach nothing
 # here. !debug: the profile strips, so a -debug split package would be empty.
 options=('!lto' '!debug')

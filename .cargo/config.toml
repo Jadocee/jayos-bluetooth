@@ -1,0 +1,23 @@
+# How this crate is linked when cargo is run in this tree: with mold,
+# https://github.com/rui314/mold, by JayOS's owner's call of 2026-11-13, "use
+# https://github.com/rui314/mold for building rust". mold's README measures it
+# ahead of GNU ld, gold and LLD on large programs; that is read, and no timing
+# of this crate was taken.
+#
+# AS A LINK ARGUMENT TO THE C COMPILER, which is the linker rustc drives on this
+# target: `-fuse-ld=mold` has gcc (12.1 or later) or clang run ld.mold in
+# place of its own. Since Rust 1.90 the default here is the LLD that rustup's
+# toolchain carries, which rustc selects with a -fuse-ld of its own, and the C
+# compiler takes the last one it is given, which is this. Run in JayOS on
+# 2026-11-13 under rustc 1.97.0 and mold 2.30.0: a binary linked under the
+# same setting carries "mold 2.30.0" in its .comment section where one linked
+# without it carries "Linker: LLD 22.1.6".
+#
+# WHO READS IT: cargo, from the directory it runs in and those above it --
+# tools/check.sh's `cargo build` and `cargo test`, and a build by hand.
+# packaging/steps.sh does not rely on it: makepkg sets RUSTFLAGS, which cargo
+# takes in place of every config's flags, so steps.sh appends mold's flag to
+# RUSTFLAGS itself. tools/check.sh links with Rust's own linker where mold is
+# not installed, and counts that as not exercised.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
