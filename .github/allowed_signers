@@ -16,3 +16,4 @@
 #
 # Both read this file as origin/main has it -- never as a tag's own tree has
 # it -- so a key added here counts only once main has taken it.
+ jadocee+github@proton.me namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAbL+qOz51Vz0hvuDtvBNMNBmNXHVZ5wi44VBxTEzUQq
