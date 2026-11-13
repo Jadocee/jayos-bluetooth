@@ -56,6 +56,26 @@ cargo_env() {
         || die "no Cargo.toml and Cargo.lock in $ROOT, so nothing can be built"
 }
 
+# MOLD LINKS WHAT THIS BUILDS, the release build and the tests, by JayOS's
+# owner's call of 2026-11-13, "use https://github.com/rui314/mold for building
+# rust". As a link argument to the C compiler rustc drives, which takes over
+# from Rust's own LLD (.cargo/config.toml says how, and what was run to show
+# it), and through RUSTFLAGS rather than that file: makepkg.conf sets
+# RUSTFLAGS, and cargo takes that in place of every config's flags. Appended to
+# what is there, once, so makepkg's own flags stay and a flag somebody set
+# already is not repeated.
+#
+# Refused before cargo where mold is missing: both recipes name it among their
+# makedepends, so a build without it is one makepkg did not prepare, and it
+# would fail at its first link. Only the steps that link ask; fetch downloads
+# and links nothing.
+MOLD_FLAG="-C link-arg=-fuse-ld=mold"
+link_with_mold() {
+    command -v ld.mold >/dev/null 2>&1 \
+        || die "mold is not installed, and this build links with it (pacman -S mold)"
+    [[ " ${RUSTFLAGS:-} " == *" $MOLD_FLAG "* ]] || export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }$MOLD_FLAG"
+}
+
 step_fetch() {
     local host
     cargo_env
@@ -70,6 +90,7 @@ step_fetch() {
 
 step_build() {
     cargo_env
+    link_with_mold
     # Cargo.toml's release profile, JayOS's settings when the crate lived
     # there: fat LTO, one codegen unit and panic = "abort", for a program whose
     # owner, the shell, restarts it when it ends.
@@ -102,6 +123,7 @@ links_only_depends() { # links_only_depends <binary>
 step_check() {
     local bin="$ROOT/target/release/$BIN" suite="$ROOT/tests/shell/test-manager.sh" status
     cargo_env
+    link_with_mold
     [[ -x "$bin" ]] || die "no $bin; build first"
     links_only_depends "$bin" || exit 1
     # The dev profile's tests, not the release build's: tests ignore

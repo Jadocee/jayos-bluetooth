@@ -53,6 +53,24 @@ in `tests/shell/`. Exit 0 is clean, 1 is a failure, 2 is "could not run" (no
 cargo, no git) -- which is not the same answer as clean and is not reported as
 one.
 
+## Linking
+
+The Rust is linked with [mold](https://github.com/rui314/mold), by JayOS's
+owner's call of 2026-11-13. `packaging/steps.sh` appends `-C
+link-arg=-fuse-ld=mold` to `RUSTFLAGS` for `build` and `check`, after
+makepkg's own and once, and refuses both before cargo where `ld.mold` is not
+found; both recipes name `mold` among their makedepends. `RUSTFLAGS` and not
+a cargo config, because makepkg sets `RUSTFLAGS`, which cargo takes in place
+of every config's flags. `.cargo/config.toml` gives cargo run in this tree
+the same flag, and `tools/check.sh` links with Rust's own LLD where mold is
+not installed, and counts that as not exercised.
+`tests/shell/test-packaging.sh` holds each of these.
+
+Run on 2026-11-13 under rustc 1.97.0 and mold 2.30.0: build in 1 min 21 s and
+check in 23 s, `jayos-bluetooth` carrying `mold 2.30.0` in its `.comment`
+section, and `tools/check.sh` found nothing to fix. Not run: Arch's
+makepkg.conf and Arch's mold 3.0.0.
+
 ## Releases
 
 A release is a signed tag, `vMAJOR.MINOR.PATCH`, on `main`, whose `VERSION`

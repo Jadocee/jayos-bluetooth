@@ -129,8 +129,18 @@ rust_checks() {
         echo "  no cargo, so the crate was not built or tested"
         return 2
     fi
-    cargo build --locked || return 1
-    cargo test --locked || return 1
+    # .cargo/config.toml links both with mold. Where mold is not installed an
+    # empty RUSTFLAGS, which cargo takes in place of that file's flags, links
+    # them with Rust's own linker instead, and the summary counts the link as
+    # not exercised: the crate is still built and tested, by a linker that is
+    # not the one packaging/steps.sh refuses to build without.
+    local -a link=()
+    if ! command -v ld.mold >/dev/null 2>&1; then
+        link=(RUSTFLAGS=)
+        echo "  skip linking the crate with mold not exercised: mold is not installed (pacman -S mold)"
+    fi
+    env "${link[@]}" cargo build --locked || return 1
+    env "${link[@]}" cargo test --locked || return 1
     if cargo fmt --version >/dev/null 2>&1; then
         cargo fmt --check || return 1
         echo "  the crate is formatted as rustfmt.toml says"
