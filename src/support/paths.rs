@@ -209,6 +209,25 @@ pub fn shell_file(rel: impl AsRef<Path>) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// Every name the code above reads by name, which the test below clears
+    /// before it sets its own. A desktop session exports QS_HYPR_DIR and its
+    /// neighbours into every terminal (config/common/scripts/paths.sh); the
+    /// test cleared four of these and not QS_HYPR_DIR, so on the owner's
+    /// machine on 2026-11-15 hypr_dir() answered the session's own directory
+    /// and jayos-bluetooth's release was refused, where a container with no
+    /// session passed. `the_names_cleared_are_the_names_read` holds this list
+    /// to the code. widget_dir's `QS_<KIND>_<WIDGET>` is built, not named, and
+    /// nothing here calls it.
+    const READ: &[&str] = &[
+        "HOME",
+        "QS_HYPR_DIR",
+        "QS_LOGIND_RUNTIME",
+        "QS_SCRIPTS_DIR",
+        "QS_SHELL_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_RUNTIME_DIR",
+    ];
+
     // Environment variables are process-global, so these run in one test to
     // keep them from racing each other under the default parallel runner.
     #[test]
@@ -216,11 +235,10 @@ mod tests {
         // SAFETY: single-threaded test, and nothing else in this process reads
         // these variables concurrently.
         unsafe {
+            for name in READ {
+                env::remove_var(name);
+            }
             env::set_var("HOME", "/home/tester");
-            env::remove_var("XDG_CONFIG_HOME");
-            env::remove_var("QS_SHELL_DIR");
-            env::remove_var("QS_SCRIPTS_DIR");
-            env::remove_var("XDG_RUNTIME_DIR");
         }
         assert_eq!(config_root(), PathBuf::from("/home/tester/.config"));
         assert_eq!(scripts_dir(), PathBuf::from("/home/tester/.config/common/scripts"));
@@ -242,6 +260,31 @@ mod tests {
         unsafe { env::set_var("QS_SHELL_DIR", "/opt/shell") };
         assert_eq!(shell_dir(), PathBuf::from("/opt/shell"));
         assert_eq!(settings_path(), PathBuf::from("/opt/shell/settings.json"));
+    }
+
+    #[test]
+    fn the_names_cleared_are_the_names_read() {
+        // The code is this file up to its tests, comment lines left out, so a
+        // comment naming a variable is not taken for a read of it.
+        let src = include_str!("paths.rs");
+        let code = &src[..src.find("#[cfg(test)]\nmod tests").expect("the test module")];
+        let mut read: Vec<&str> = Vec::new();
+        for line in code.lines().filter(|l| !l.trim_start().starts_with("//")) {
+            for call in ["env_dir(\"", "var_os(\""] {
+                let mut rest = line;
+                while let Some(i) = rest.find(call) {
+                    rest = &rest[i + call.len()..];
+                    if let Some(end) = rest.find('"') {
+                        read.push(&rest[..end]);
+                    }
+                }
+            }
+        }
+        read.sort_unstable();
+        read.dedup();
+        let mut cleared = READ.to_vec();
+        cleared.sort_unstable();
+        assert_eq!(read, cleared, "the names paths.rs reads, and the names its test clears");
     }
 
     // ── the runtime directory with no XDG_RUNTIME_DIR ────────────────────────
